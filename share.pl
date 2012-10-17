@@ -9,6 +9,7 @@ use Data::Dumper;
 app->config(hypnotoad => {pid_file=>'.share', listen=>['http://*:3006'], proxy=>1});
 app->secret('My secret passphrase here');
 helper db => sub { Share::Schema->connect({dsn=>'DBI:mysql:database=share;host=localhost',user=>'share',password=>'share'}) };
+plugin 'nginx';
 
 use constant PASSMSG => 'Optional Encryption Password';
 
@@ -20,7 +21,7 @@ use constant PASSMSG => 'Optional Encryption Password';
 
 get '/share';
 any '/:code' => sub { shift->redirect_to('codeview') };
-get '/' => sub { shift->redirect_to('/'.substr(md5_hex(time), 0, 5).'/edit') }; # Make sure it doesn't already exist
+get '/' => sub { shift->redirect_to('/'.substr(md5_hex(time), 0, 5).'/edit') } => 'new'; # Make sure it doesn't already exist
 
 get '/:code/raw' => sub {
 	my $self = shift;
@@ -48,7 +49,7 @@ any '/:code/view' => sub {
 	return $self->render_not_found unless $code_rec = $self->db->resultset("Share")->find({code=>$code});
 	my $share = $code_rec->encrypted ? defined $cipher ? $cipher->decrypt_hex($code_rec->share) : undef : $code_rec->share;
 
-	my $data = {share => $share, code_rec => $code_rec};
+	my $data = {code => $code, share => $share, code_rec => $code_rec};
 	return $self->respond_to(
 		json => {json => $data},
 		html => {template => 'view', %{$data}},
@@ -70,46 +71,11 @@ any '/:code/edit' => sub {
 	my $code_rec = $self->db->resultset("Share")->find({code=>$code});
 	my $share = defined $code_rec ? $code_rec->encrypted ? defined $cipher ? $cipher->decrypt_hex($code_rec->share) : undef : $code_rec->share : undef;
 
-	my $data = {share => $share, code_rec => $code_rec};
+	my $data = {code => $code, share => $share, code_rec => $code_rec};
 	$self->stash(format => 'json') if $self->req->is_xhr;
 	return $self->respond_to(
 		json => {json => $data},
 		html => {template => 'edit', %{$data}},
-	);
-};
-
-any '/:code/:cmd' => {cmd => 'raw'} => sub {
-	my $self = shift;
-	return $self->render_not_found;
-
-	my $cipher = $self->param('password') && $self->param('password') ne PASSMSG ? new Crypt::CBC(-key=>$self->param('password'), -cipher=>'Blowfish') : undef;
-	my $code = $self->param('code');
-
-	my $share;
-	if ( $share = $self->param('share') ) {
-		my %share = $cipher ? (share=>$cipher->encrypt_hex($self->param('share')), encrypted=>1) : (share=>$self->param('share'), encrypted=>0);
-		$self->db->resultset("Share")->update_or_create({code=>$code, %share}, {key=>'code'});
-	} else {
-		if ( my $code_rec = $self->db->resultset("Share")->find({code=>$code}) ) {
-			$share = $cipher ? $cipher->decrypt_hex($code_rec->share) : $code_rec->encrypted ? undef : $code_rec->share;
-		}
-	}
-
-	my $data = {
-		cmd => $self->param('cmd'),
-		shareurl => "/$code",
-		viewurl => "/$code/view",
-		editurl => "/$code/edit",
-		code => $code,
-		share => $share||'',
-	};
-
-	#return $self->redirect_to($data->{editurl}) unless $share && $self->param('cmd') eq 'edit';
-	return $self->respond_to(
-		json => {json => $data},
-		html => {
-			$self->param('cmd') eq 'raw' ? (text => $share||'', format => 'txt') : (template => 'share', data => $data),
-		},
 	);
 };
 
@@ -140,14 +106,18 @@ __DATA__
 <link   href="/share.css" type="text/css" rel="stylesheet" media="all" />
 </head>
 <body>
-<div id="shareurl">Share: <%= link_to url_for('code', code=>$code_rec->code)->to_abs => begin %><%= url_for('code', code=>$code_rec->code)->to_abs %><% end %></div>
-<div id="rawurl">Raw: <%= link_to url_for('coderaw', code=>$code_rec->code)->to_abs => begin %><%= url_for('coderaw', code=>$code_rec->code)->to_abs %><% end %></div>
-<div id="editurl">Edit: <%= link_to url_for('codeedit', code=>$code_rec->code)->to_abs => begin %><%= url_for('codeedit', code=>$code_rec->code)->to_abs %><% end %></div>
+<div id="newurl">New: <%= link_to url_for('new')->to_abs => begin %><%= url_for('new')->to_abs %><% end %></div>
 <hr />
-<span id="submit">Submit</span>
-<input type="text" id="password" name="password" value="Optional Encryption Password" onfocus="if(this.value=='Optional Encryption Password'){this.value='';}" onblur="if(this.value==''){this.value='Optional Encryption Password';}" />
+<div id="shareurl">Share: <%= link_to url_for('code', code=>$code)->to_abs => begin %><%= url_for('code', code=>$code)->to_abs %><% end %></div>
+<div id="rawurl">Raw: <%= link_to url_for('coderaw', code=>$code)->to_abs => begin %><%= url_for('coderaw', code=>$code)->to_abs %><% end %></div>
+<div id="editurl">Edit: <%= link_to url_for('codeedit', code=>$code)->to_abs => begin %><%= url_for('codeedit', code=>$code)->to_abs %><% end %></div>
 <hr />
-<div id="view"><%= $share %></div>
+% if ( defined $code_rec && $code_rec->encrypted ) {
+	<span id="submit">Submit</span>
+	<input type="text" id="password" name="password" value="Optional Encryption Password" onfocus="if(this.value=='Optional Encryption Password'){this.value='';}" onblur="if(this.value==''){this.value='Optional Encryption Password';}" />
+	<hr />
+% }
+<div id="view"><pre><%= $share %></pre></div>
 <hr />
 %# pre(&style).
 %# pre(script($data)).
@@ -166,8 +136,10 @@ __DATA__
 <link   href="/share.css" type="text/css" rel="stylesheet" media="all" />
 </head>
 <body>
-<div id="shareurl">Share: <%= link_to url_for('code', code=>$code_rec->code)->to_abs => begin %><%= url_for('code', code=>$code_rec->code)->to_abs %><% end %></div>
-<div id="rawurl">Raw: <%= link_to url_for('coderaw', code=>$code_rec->code)->to_abs => begin %><%= url_for('coderaw', code=>$code_rec->code)->to_abs %><% end %></div>
+<div id="newurl">New: <%= link_to url_for('new')->to_abs => begin %><%= url_for('new')->to_abs %><% end %></div>
+<hr />
+<div id="shareurl">Share: <%= link_to url_for('code', code=>$code)->to_abs => begin %><%= url_for('code', code=>$code)->to_abs %><% end %></div>
+<div id="rawurl">Raw: <%= link_to url_for('coderaw', code=>$code)->to_abs => begin %><%= url_for('coderaw', code=>$code)->to_abs %><% end %></div>
 <hr />
 <span id="submit">Submit</span>
 <input type="text" id="password" value="Optional Encryption Password" onfocus="if(this.value=='Optional Encryption Password'){this.value='';}" onblur="if(this.value==''){this.value='Optional Encryption Password';}" class="ui-widget-content" />
