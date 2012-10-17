@@ -1,0 +1,6 @@
+#!/bin/sh
+
+pwd=$(pwd)
+cd $(dirname $0)
+dbicdump -o dump_directory=../lib -o components='["InflateColumn::DateTime"]' -o preserve_case=1 Share::Schema dbi:mysql:database=share share share '{ quote_char => "`" }'
+cd $pwd
